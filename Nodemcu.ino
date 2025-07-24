@@ -1,0 +1,320 @@
+#include <FirebaseESP8266.h>
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+#include <DHT.h>
+#include <time.h>
+#include <ESP8266WiFi.h>
+
+// WiFi credentials
+const char* ssid = "Pi";
+const char* password = "12345678";
+
+// Firebase credentials
+FirebaseConfig config;
+FirebaseAuth auth;
+FirebaseData firebaseData;
+
+// Sensor pins
+#define DHTPIN D4        // GPIO2
+#define DHTTYPE DHT11
+#define RAIN_ANALOG_PIN A0
+#define RAIN_DIGITAL_PIN D5
+#define LDR_ANALOG_PIN A0
+#define LDR_DIGITAL_PIN D6
+
+DHT dht(DHTPIN, DHTTYPE);
+Adafruit_BMP280 bmp; // I2C
+
+// UID tracker
+int uid = 1;
+
+// LED blink actions
+enum LedAction {
+  LED_OK,
+  LED_WIFI_ERROR,
+  LED_FIREBASE_ERROR,
+  LED_DHT_ERROR,
+  LED_BMP_ERROR,
+  LED_UPLOAD_SUCCESS,
+  LED_UPLOAD_FAIL,
+  LED_FATAL
+};
+
+void blinkLED(LedAction action) {
+  switch (action) {
+    case LED_OK:
+      // 1 short blink
+      digitalWrite(LED_BUILTIN, LOW);
+      delay(120);
+      digitalWrite(LED_BUILTIN, HIGH);
+      break;
+    case LED_WIFI_ERROR:
+      // 5 fast blinks
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(80);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(80);
+      }
+      break;
+    case LED_FIREBASE_ERROR:
+      // 4 long blinks
+      for (int i = 0; i < 4; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(400);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(400);
+      }
+      break;
+    case LED_DHT_ERROR:
+      // 3 double quick blinks
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(60);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(60);
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(60);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(150);
+      }
+      break;
+    case LED_BMP_ERROR:
+      // 3 long blinks
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(300);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(300);
+      }
+      break;
+    case LED_UPLOAD_SUCCESS:
+      // 2 short blinks
+      for (int i = 0; i < 2; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(120);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(120);
+      }
+      break;
+    case LED_UPLOAD_FAIL:
+      // 6 slow blinks
+      for (int i = 0; i < 6; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(350);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(350);
+      }
+      break;
+    case LED_FATAL:
+      // Continuous fast blinking
+      for (int i = 0; i < 20; i++) {
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(80);
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(80);
+      }
+      break;
+  }
+}
+
+void waitForWiFi() {
+  int retry = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+    retry++;
+    if (retry > 15) {
+      Serial.println("WiFi connection failed.");
+      blinkLED(LED_WIFI_ERROR);
+      retry = 0;
+    }
+  }
+  Serial.println("Connected to WiFi");
+}
+
+void waitForFirebase() {
+  int retry = 0;
+  while (!Firebase.ready()) {
+    delay(1000);
+    Serial.println("Connecting to Firebase...");
+    retry++;
+    if (retry > 10) {
+      Serial.println("Firebase connection failed.");
+      blinkLED(LED_FIREBASE_ERROR);
+      retry = 0;
+    }
+  }
+  Serial.println("Firebase ready");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(RAIN_DIGITAL_PIN, INPUT);
+  pinMode(LDR_DIGITAL_PIN, INPUT);
+
+  // Connect WiFi
+  WiFi.begin(ssid, password);
+  waitForWiFi();
+
+  // Firebase config
+  config.host = "weather-54c9e-default-rtdb.asia-southeast1.firebasedatabase.app";
+  config.api_key = "AIzaSyCcM8Y1KCmQ2xTmHgN2XJ7XqiBUmKvZTcY";
+  auth.user.email = "nisan@gmail.com";
+  auth.user.password = "g@4re#@tA54w";
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Time setup for GMT+6
+  configTime(21600, 0, "pool.ntp.org", "time.nist.gov");  // 21600 seconds = 6*60*60
+
+  // Sensor setup
+  dht.begin();
+  if (!bmp.begin(0x76)) { // 0x76 or 0x77 depending on your module (try 0x76 first)
+    Serial.println("Could not find BMP280 sensor!");
+    blinkLED(LED_FATAL);
+    // Continue, but set error in main loop
+  }
+  Serial.println("Firebase and Sensors initialized");
+}
+
+String getCurrentTimestamp() {
+  time_t now = time(nullptr);
+  if (now < 100000) {
+    // Time not yet set
+    return "TIME_ERROR";
+  }
+  struct tm* timeinfo = localtime(&now); // Use localtime for GMT+6
+  char buffer[25];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+  return String(buffer);
+}
+
+void loop() {
+  // WiFi check
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected, attempting reconnect...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+    waitForWiFi();
+  }
+
+  // Firebase check
+  if (!Firebase.ready()) {
+    Serial.println("Firebase not ready, attempting reconnect...");
+    Firebase.begin(&config, &auth);
+    Firebase.reconnectWiFi(true);
+    waitForFirebase();
+  }
+
+  // DHT11
+  float dhtTemp = dht.readTemperature();
+  float dhtHum = dht.readHumidity();
+  bool dhtError = isnan(dhtTemp) || isnan(dhtHum);
+  if (dhtError) {
+    Serial.println("DHT11 read failed!");
+    blinkLED(LED_DHT_ERROR);
+    // Try to reinitialize
+    dht.begin();
+    dhtTemp = dht.readTemperature();
+    dhtHum = dht.readHumidity();
+    dhtError = isnan(dhtTemp) || isnan(dhtHum);
+    if (dhtError) {
+      Serial.println("DHT11 reinit failed!");
+    }
+  }
+
+  // BMP280
+  float bmpTemp = 0, bmpPressure = 0;
+  bool bmpError = false;
+  if (!bmp.begin(0x76)) { // Try to reinitialize if it fails
+    Serial.println("BMP280 sensor not found!");
+    bmpError = true;
+    blinkLED(LED_BMP_ERROR);
+  } else {
+    bmpTemp = bmp.readTemperature();
+    bmpPressure = bmp.readPressure() / 100.0F;  // hPa
+    if (isnan(bmpTemp) || isnan(bmpPressure)) {
+      bmpError = true;
+      Serial.println("BMP280 read failed!");
+      blinkLED(LED_BMP_ERROR);
+      // Try again
+      bmpTemp = bmp.readTemperature();
+      bmpPressure = bmp.readPressure() / 100.0F;
+      if (isnan(bmpTemp) || isnan(bmpPressure)) {
+        Serial.println("BMP280 re-read failed!");
+      }
+    }
+  }
+
+  // Rain Sensor
+  int rainAnalog = -1, rainDigital = -1;
+  bool rainError = false;
+  // Try-catch not available; use value checks
+  rainAnalog = analogRead(RAIN_ANALOG_PIN);
+  rainDigital = digitalRead(RAIN_DIGITAL_PIN);
+  if (rainAnalog < 0 || rainAnalog > 1023 || (rainDigital != 0 && rainDigital != 1)) {
+    Serial.println("Rain sensor read error!");
+    rainError = true;
+  }
+
+  // LDR Sensor
+  int ldrAnalog = -1, ldrDigital = -1;
+  bool ldrError = false;
+  ldrAnalog = analogRead(LDR_ANALOG_PIN);
+  ldrDigital = digitalRead(LDR_DIGITAL_PIN);
+  if (ldrAnalog < 0 || ldrAnalog > 1023 || (ldrDigital != 0 && ldrDigital != 1)) {
+    Serial.println("LDR sensor read error!");
+    ldrError = true;
+  }
+
+  // Prepare JSON
+  FirebaseJson jsonData;
+  jsonData.add("uid", uid++);
+  String timestamp = getCurrentTimestamp();
+  jsonData.add("timestamp", timestamp);
+  jsonData.add("dht_temp_C", dhtError ? "ERROR" : String(dhtTemp));
+  jsonData.add("dht_hum_percent", dhtError ? "ERROR" : String(dhtHum));
+  jsonData.add("dht11_status", dhtError ? "ERROR" : "OK");
+
+  jsonData.add("bmp280_temp_C", bmpError ? "ERROR" : String(bmpTemp));
+  jsonData.add("bmp280_pressure_hPa", bmpError ? "ERROR" : String(bmpPressure));
+  jsonData.add("bmp280_status", bmpError ? "ERROR" : "OK");
+
+  jsonData.add("rain_analog", rainError ? "ERROR" : String(rainAnalog));
+  jsonData.add("rain_digital", rainError ? "ERROR" : String(rainDigital));
+  jsonData.add("rain_status", rainError ? "ERROR" : "OK");
+
+  jsonData.add("ldr_analog", ldrError ? "ERROR" : String(ldrAnalog));
+  jsonData.add("ldr_digital", ldrError ? "ERROR" : String(ldrDigital));
+  jsonData.add("ldr_status", ldrError ? "ERROR" : "OK");
+
+  jsonData.add("timestamp_status", (timestamp == "TIME_ERROR") ? "ERROR" : "OK");
+
+  // Upload to Firebase
+  String path = "/sensorData";
+  if (Firebase.pushJSON(firebaseData, path.c_str(), jsonData)) {
+    Serial.println("Data uploaded with UID: " + String(uid - 1));
+    blinkLED(LED_UPLOAD_SUCCESS);
+  } else {
+    Serial.print("Firebase upload error: ");
+    Serial.println(firebaseData.errorReason());
+    blinkLED(LED_UPLOAD_FAIL);
+  }
+
+  // Print to Serial for debug
+  Serial.print("DHT11 Temp: "); Serial.print(dhtTemp);
+  Serial.print(" C, Hum: "); Serial.print(dhtHum);
+  Serial.print(" % | BMP280 Temp: "); Serial.print(bmpTemp);
+  Serial.print(" C, Pressure: "); Serial.print(bmpPressure);
+  Serial.print(" hPa | Rain: "); Serial.print(rainAnalog);
+  Serial.print(" (Digital: "); Serial.print(rainDigital);
+  Serial.print(") | LDR: "); Serial.print(ldrAnalog);
+  Serial.print(" (Digital: "); Serial.print(ldrDigital);
+  Serial.println(")");
+
+  delay(10000); // Upload every 10 seconds
+}
